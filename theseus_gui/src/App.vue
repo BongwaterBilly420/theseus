@@ -1,6 +1,6 @@
 <script setup>
-import { ref, watch } from 'vue'
-import { RouterView, RouterLink, useRouter } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { RouterView, RouterLink, useRouter, useRoute } from 'vue-router'
 import {
   HomeIcon,
   SearchIcon,
@@ -29,6 +29,10 @@ import mixpanel from 'mixpanel-browser'
 import { saveWindowState, StateFlags } from 'tauri-plugin-window-state-api'
 import OnboardingModal from '@/components/OnboardingModal.vue'
 import { getVersion } from '@tauri-apps/api/app'
+import { window as TauriWindow } from '@tauri-apps/api'
+import { TauriEvent } from '@tauri-apps/api/event'
+import { await_sync, check_safe_loading_bars_complete } from './helpers/state'
+import { confirm } from '@tauri-apps/api/dialog'
 
 const themeStore = useTheming()
 
@@ -69,12 +73,41 @@ defineExpose({
   },
 })
 
+const confirmClose = async () => {
+  const confirmed = await confirm(
+    'An action is currently in progress. Are you sure you want to exit?',
+    {
+      title: 'Modrinth',
+      type: 'warning',
+    }
+  )
+  return confirmed
+}
+
+const handleClose = async () => {
+  const isSafe = await check_safe_loading_bars_complete()
+  if (!isSafe) {
+    const response = await confirmClose()
+    if (!response) {
+      return
+    }
+  }
+  await await_sync()
+  await TauriWindow.getCurrent().close()
+}
+
+TauriWindow.getCurrent().listen(TauriEvent.WINDOW_CLOSE_REQUESTED, async () => {
+  await handleClose()
+})
+
 const router = useRouter()
 router.afterEach((to, from, failure) => {
   if (mixpanel.__loaded) {
     mixpanel.track('PageView', { path: to.path, fromPath: from.path, failed: failure })
   }
 })
+const route = useRoute()
+const isOnBrowse = computed(() => route.path.startsWith('/browse'))
 
 const loading = useLoading()
 
@@ -103,8 +136,8 @@ document.querySelector('body').addEventListener('click', function (e) {
             path: target.href,
           },
         })
-        e.preventDefault()
       }
+      e.preventDefault()
       break
     }
     target = target.parentElement
@@ -120,24 +153,13 @@ const accounts = ref(null)
     <suspense>
       <OnboardingModal ref="testModal" :accounts="accounts" />
     </suspense>
-    <div class="nav-container" :class="{ expanded: !themeStore.collapsedNavigation }">
+    <div class="nav-container">
       <div class="nav-section">
         <suspense>
-          <AccountsCard
-            ref="accounts"
-            :mode="themeStore.collapsedNavigation ? 'small' : 'expanded'"
-          />
+          <AccountsCard ref="accounts" mode="small" />
         </suspense>
         <div class="pages-list">
-          <RouterLink
-            to="/"
-            class="btn"
-            :class="{
-              'icon-only': themeStore.collapsedNavigation,
-              'collapsed-button': themeStore.collapsedNavigation,
-              'expanded-button': !themeStore.collapsedNavigation,
-            }"
-          >
+          <RouterLink to="/" class="btn icon-only collapsed-button">
             <HomeIcon />
             <span v-if="!themeStore.collapsedNavigation">Home</span>
           </RouterLink>
@@ -148,6 +170,7 @@ const accounts = ref(null)
               'icon-only': themeStore.collapsedNavigation,
               'collapsed-button': themeStore.collapsedNavigation,
               'expanded-button': !themeStore.collapsedNavigation,
+              'router-link-active': isOnBrowse,
             }"
           >
             <SearchIcon />
@@ -198,15 +221,17 @@ const accounts = ref(null)
       </div>
     </div>
     <div class="view" :class="{ expanded: !themeStore.collapsedNavigation }">
-      <div data-tauri-drag-region class="appbar">
-        <section class="navigation-controls">
-          <Breadcrumbs data-tauri-drag-region />
-        </section>
-        <section class="mod-stats">
-          <Suspense>
-            <RunningAppBar data-tauri-drag-region />
-          </Suspense>
-        </section>
+      <div class="appbar-row">
+        <div data-tauri-drag-region class="appbar">
+          <section class="navigation-controls">
+            <Breadcrumbs data-tauri-drag-region />
+          </section>
+          <section class="mod-stats">
+            <Suspense>
+              <RunningAppBar data-tauri-drag-region />
+            </Suspense>
+          </section>
+        </div>
         <section class="window-controls">
           <Button class="titlebar-button" icon-only @click="() => appWindow.minimize()">
             <MinimizeIcon />
@@ -220,7 +245,7 @@ const accounts = ref(null)
             @click="
               () => {
                 saveWindowState(StateFlags.ALL)
-                appWindow.close()
+                handleClose()
               }
             "
           >
@@ -257,12 +282,16 @@ const accounts = ref(null)
   width: min-content;
 }
 
+.appbar-row {
+  display: flex;
+  flex-direction: row;
+}
+
 .window-controls {
   z-index: 20;
   display: none;
   flex-direction: row;
   align-items: center;
-  gap: 0.25rem;
 
   .titlebar-button {
     display: flex;
@@ -272,6 +301,8 @@ const accounts = ref(null)
     transition: all ease-in-out 0.1s;
     background-color: var(--color-raised-bg);
     color: var(--color-base);
+    border-radius: 0;
+    height: 3.25rem;
 
     &.close {
       &:hover,
@@ -308,8 +339,9 @@ const accounts = ref(null)
     .appbar {
       display: flex;
       align-items: center;
+      flex-grow: 1;
       background: var(--color-raised-bg);
-      box-shadow: var(--shadow-inset-sm), var(--shadow-floating);
+      box-shadow: inset 0px -3px 0px black;
       text-align: center;
       padding: var(--gap-md);
       height: 3.25rem;

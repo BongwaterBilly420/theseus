@@ -1,10 +1,13 @@
 //! Theseus settings file
-use crate::{jre, State};
+use crate::{
+    jre::{self, autodetect_java_globals, find_filtered_jres},
+    State,
+};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
-use super::JavaGlobals;
+use super::{DirectoryInfo, JavaGlobals};
 
 // TODO: convert to semver?
 const CURRENT_FORMAT_VERSION: u32 = 1;
@@ -12,7 +15,6 @@ const CURRENT_FORMAT_VERSION: u32 = 1;
 // Types
 /// Global Theseus settings
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(default)]
 pub struct Settings {
     pub theme: Theme,
     pub memory: MemorySettings,
@@ -27,6 +29,10 @@ pub struct Settings {
     pub version: u32,
     pub collapsed_navigation: bool,
     #[serde(default)]
+    pub hide_on_process: bool,
+    #[serde(default)]
+    pub default_page: DefaultPage,
+    #[serde(default)]
     pub developer_mode: bool,
     #[serde(default)]
     pub opt_out_analytics: bool,
@@ -34,29 +40,8 @@ pub struct Settings {
     pub advanced_rendering: bool,
     #[serde(default)]
     pub onboarded: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            theme: Theme::Dark,
-            memory: MemorySettings::default(),
-            game_resolution: WindowSize::default(),
-            custom_java_args: Vec::new(),
-            custom_env_args: Vec::new(),
-            java_globals: JavaGlobals::new(),
-            default_user: None,
-            hooks: Hooks::default(),
-            max_concurrent_downloads: 10,
-            max_concurrent_writes: 10,
-            version: CURRENT_FORMAT_VERSION,
-            collapsed_navigation: false,
-            developer_mode: false,
-            opt_out_analytics: false,
-            advanced_rendering: true,
-            onboarded: false,
-        }
-    }
+    #[serde(default = "DirectoryInfo::get_initial_settings_dir")]
+    pub loaded_config_dir: Option<PathBuf>,
 }
 
 impl Settings {
@@ -76,7 +61,29 @@ impl Settings {
                         .map_err(crate::Error::from)
                 })
         } else {
-            Ok(Settings::default())
+            Ok(Self {
+                theme: Theme::Dark,
+                memory: MemorySettings::default(),
+                game_resolution: WindowSize::default(),
+                custom_java_args: Vec::new(),
+                custom_env_args: Vec::new(),
+                java_globals: JavaGlobals::new(),
+                default_user: None,
+                hooks: Hooks::default(),
+                max_concurrent_downloads: 10,
+                max_concurrent_writes: 10,
+                version: CURRENT_FORMAT_VERSION,
+                collapsed_navigation: false,
+                hide_on_process: false,
+                default_page: DefaultPage::Home,
+                developer_mode: false,
+                opt_out_analytics: false,
+                advanced_rendering: true,
+                onboarded: false,
+
+                // By default, the config directory is the same as the settings directory
+                loaded_config_dir: DirectoryInfo::get_initial_settings_dir(),
+            })
         }
     }
 
@@ -89,7 +96,16 @@ impl Settings {
 
             if settings_read.java_globals.count() == 0 {
                 drop(settings_read);
-                let java_globals = jre::autodetect_java_globals().await?;
+                let jres = jre::get_all_jre().await?;
+                let java_8 =
+                    find_filtered_jres("1.8", jres.clone(), false).await?;
+                let java_17 =
+                    find_filtered_jres("1.17", jres.clone(), false).await?;
+                let java_18plus =
+                    find_filtered_jres("1.18", jres.clone(), true).await?;
+                let java_globals =
+                    autodetect_java_globals(java_8, java_17, java_18plus)
+                        .await?;
                 state.settings.write().await.java_globals = java_globals;
             }
 
@@ -114,7 +130,8 @@ impl Settings {
                     "Error saving settings to file: {err}"
                 ))
                 .as_error()
-            })
+            })?;
+        Ok(())
     }
 }
 
@@ -159,4 +176,17 @@ pub struct Hooks {
     pub wrapper: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_exit: Option<String>,
+}
+
+/// Opening window to start with
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum DefaultPage {
+    Home,
+    Library,
+}
+
+impl Default for DefaultPage {
+    fn default() -> Self {
+        Self::Home
+    }
 }

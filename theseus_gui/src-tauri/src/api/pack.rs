@@ -1,23 +1,33 @@
 use crate::api::Result;
-use std::path::{Path, PathBuf};
-use theseus::prelude::*;
 
-#[tauri::command]
-pub async fn pack_install_version_id(
-    project_id: String,
-    version_id: String,
-    pack_title: String,
-    pack_icon: Option<String>,
-) -> Result<PathBuf> {
-    let res = pack::install_pack_from_version_id(
-        project_id, version_id, pack_title, pack_icon,
-    )
-    .await?;
-    Ok(res)
+use theseus::{
+    pack::{
+        install_from::{CreatePackLocation, CreatePackProfile},
+        install_mrpack::install_zipped_mrpack,
+    },
+    prelude::*,
+};
+
+pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("pack")
+        .invoke_handler(tauri::generate_handler![
+            pack_install,
+            pack_get_profile_from_pack,
+        ])
+        .build()
 }
 
 #[tauri::command]
-pub async fn pack_install_file(path: &Path) -> Result<PathBuf> {
-    let res = pack::install_pack_from_file(path.to_path_buf()).await?;
-    Ok(res)
+pub async fn pack_install(
+    location: CreatePackLocation,
+    profile: ProfilePathId,
+) -> Result<ProfilePathId> {
+    Ok(install_zipped_mrpack(location, profile).await?)
+}
+
+#[tauri::command]
+pub fn pack_get_profile_from_pack(
+    location: CreatePackLocation,
+) -> Result<CreatePackProfile> {
+    Ok(pack::install_from::get_profile_from_pack(location))
 }

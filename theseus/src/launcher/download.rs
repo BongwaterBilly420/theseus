@@ -6,7 +6,7 @@ use crate::{
         LoadingBarId,
     },
     state::State,
-    util::{fetch::*, platform::OsExt},
+    util::{fetch::*, io, platform::OsExt},
 };
 use daedalus::{
     self as d,
@@ -17,7 +17,7 @@ use daedalus::{
     modded::LoaderVersion,
 };
 use futures::prelude::*;
-use tokio::{fs, sync::OnceCell};
+use tokio::sync::OnceCell;
 
 #[tracing::instrument(skip(st, version))]
 pub async fn download_minecraft(
@@ -68,10 +68,11 @@ pub async fn download_version_info(
     let path = st
         .directories
         .version_dir(&version_id)
+        .await
         .join(format!("{version_id}.json"));
 
     let res = if path.exists() && !force.unwrap_or(false) {
-        fs::read(path)
+        io::read(path)
             .err_into::<crate::Error>()
             .await
             .and_then(|ref it| Ok(serde_json::from_slice(it)?))
@@ -118,6 +119,7 @@ pub async fn download_client(
     let path = st
         .directories
         .version_dir(version)
+        .await
         .join(format!("{version}.jar"));
 
     if !path.exists() {
@@ -149,10 +151,11 @@ pub async fn download_assets_index(
     let path = st
         .directories
         .assets_index_dir()
+        .await
         .join(format!("{}.json", &version.asset_index.id));
 
     let res = if path.exists() {
-        fs::read(path)
+        io::read(path)
             .err_into::<crate::Error>()
             .await
             .and_then(|ref it| Ok(serde_json::from_slice(it)?))
@@ -192,7 +195,7 @@ pub async fn download_assets(
             None,
             |(name, asset)| async move {
                 let hash = &asset.hash;
-                let resource_path = st.directories.object_dir(hash);
+                let resource_path = st.directories.object_dir(hash).await;
                 let url = format!(
                     "https://resources.download.minecraft.net/{sub_hash}/{hash}",
                     sub_hash = &hash[..2]
@@ -215,7 +218,7 @@ pub async fn download_assets(
                             let resource = fetch_cell
                                 .get_or_try_init(|| fetch(&url, Some(hash), &st.fetch_semaphore))
                                 .await?;
-                            let resource_path = st.directories.legacy_assets_dir().join(
+                            let resource_path = st.directories.legacy_assets_dir().await.join(
                                 name.replace('/', &String::from(std::path::MAIN_SEPARATOR))
                             );
                             write(&resource_path, resource, &st.io_semaphore).await?;
@@ -245,8 +248,8 @@ pub async fn download_libraries(
     tracing::debug!("Loading libraries");
 
     tokio::try_join! {
-        fs::create_dir_all(st.directories.libraries_dir()),
-        fs::create_dir_all(st.directories.version_natives_dir(version))
+        io::create_dir_all(st.directories.libraries_dir().await),
+        io::create_dir_all(st.directories.version_natives_dir(version).await)
     }?;
     let num_files = libraries.len();
     loading_try_for_each_concurrent(
@@ -262,7 +265,7 @@ pub async fn download_libraries(
                 tokio::try_join! {
                     async {
                         let artifact_path = d::get_path_from_artifact(&library.name)?;
-                        let path = st.directories.libraries_dir().join(&artifact_path);
+                        let path = st.directories.libraries_dir().await.join(&artifact_path);
 
                         match library.downloads {
                             _ if path.exists() => Ok(()),
@@ -314,7 +317,7 @@ pub async fn download_libraries(
                                 let data = fetch(&native.url, Some(&native.sha1), &st.fetch_semaphore).await?;
                                 let reader = std::io::Cursor::new(&data);
                                 if let Ok(mut archive) = zip::ZipArchive::new(reader) {
-                                    match archive.extract(&st.directories.version_natives_dir(version)) {
+                                    match archive.extract(st.directories.version_natives_dir(version).await) {
                                         Ok(_) => tracing::info!("Fetched native {}", &library.name),
                                         Err(err) => tracing::error!("Failed extracting native {}. err: {}", &library.name, err)
                                     }

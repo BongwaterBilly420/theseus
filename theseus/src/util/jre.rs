@@ -1,4 +1,4 @@
-use dunce::canonicalize;
+use super::io;
 use futures::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -136,11 +136,9 @@ pub async fn get_all_jre() -> Result<Vec<JavaVersion>, JREError> {
     // Iterate over JavaVirtualMachines/(something)/Contents/Home/bin
     let base_path = PathBuf::from("/Library/Java/JavaVirtualMachines/");
     if let Ok(dir) = std::fs::read_dir(base_path) {
-        for entry in dir {
-            if let Ok(entry) = entry {
-                let entry = entry.path().join("Contents/Home/bin");
-                jre_paths.insert(entry);
-            }
+        for entry in dir.flatten() {
+            let entry = entry.path().join("Contents/Home/bin");
+            jre_paths.insert(entry);
         }
     }
 
@@ -178,12 +176,10 @@ pub async fn get_all_jre() -> Result<Vec<JavaVersion>, JREError> {
         jre_paths.insert(PathBuf::from(&path).join("jre").join("bin"));
         jre_paths.insert(PathBuf::from(&path).join("bin"));
         if let Ok(dir) = std::fs::read_dir(path) {
-            for entry in dir {
-                if let Ok(entry) = entry {
-                    let entry_path = entry.path();
-                    jre_paths.insert(entry_path.join("jre").join("bin"));
-                    jre_paths.insert(entry_path.join("bin"));
-                }
+            for entry in dir.flatten() {
+                let entry_path = entry.path();
+                jre_paths.insert(entry_path.join("jre").join("bin"));
+                jre_paths.insert(entry_path.join("bin"));
             }
         }
     }
@@ -205,25 +201,23 @@ async fn get_all_autoinstalled_jre_path() -> Result<HashSet<PathBuf>, JREError>
         let state = State::get().await.map_err(|_| JREError::StateError)?;
 
         let mut jre_paths = HashSet::new();
-        let base_path = state.directories.java_versions_dir();
+        let base_path = state.directories.java_versions_dir().await;
 
         if base_path.is_dir() {
             if let Ok(dir) = std::fs::read_dir(base_path) {
-                for entry in dir {
-                    if let Ok(entry) = entry {
-                        let file_path = entry.path().join("bin");
+                for entry in dir.flatten() {
+                    let file_path = entry.path().join("bin");
 
-                        if let Ok(contents) =
-                            std::fs::read_to_string(file_path.clone())
+                    if let Ok(contents) =
+                        std::fs::read_to_string(file_path.clone())
+                    {
+                        let entry = entry.path().join(contents);
+                        jre_paths.insert(entry);
+                    } else {
+                        #[cfg(not(target_os = "macos"))]
                         {
-                            let entry = entry.path().join(contents);
-                            jre_paths.insert(entry);
-                        } else {
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                let file_path = file_path.join(JAVA_BIN);
-                                jre_paths.insert(file_path);
-                            }
+                            let file_path = file_path.join(JAVA_BIN);
+                            jre_paths.insert(file_path);
                         }
                     }
                 }
@@ -276,7 +270,7 @@ pub async fn check_java_at_filepaths(
 pub async fn check_java_at_filepath(path: &Path) -> Option<JavaVersion> {
     // Attempt to canonicalize the potential java filepath
     // If it fails, this path does not exist and None is returned (no Java here)
-    let Ok(path) = canonicalize(path) else { return None };
+    let Ok(path) = io::canonicalize(path) else { return None };
 
     // Checks for existence of Java at this filepath
     // Adds JAVA_BIN to the end of the path if it is not already there

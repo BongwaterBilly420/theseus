@@ -5,8 +5,10 @@ use crate::state::Profile;
 use crate::util::fetch::{
     fetch_json, write_cached_icon, FetchSemaphore, IoSemaphore,
 };
+use crate::util::io::IOError;
 use async_zip::tokio::read::fs::ZipFileReader;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -14,6 +16,8 @@ use sha2::Digest;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
+
+use super::ProjectPathId;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -252,7 +256,10 @@ async fn read_icon_from_file(
     Ok(None)
 }
 
-#[tracing::instrument(skip(profile, io_semaphore, fetch_semaphore))]
+// Creates Project data from the existing files in the file system, for a given Profile
+// Paths must be the full paths to the files in the FS, and not the relative paths
+// eg: with get_profile_full_project_paths
+#[tracing::instrument(skip(paths, profile, io_semaphore, fetch_semaphore))]
 #[theseus_macros::debug_pin]
 pub async fn infer_data_from_files(
     profile: Profile,
@@ -260,15 +267,17 @@ pub async fn infer_data_from_files(
     cache_dir: PathBuf,
     io_semaphore: &IoSemaphore,
     fetch_semaphore: &FetchSemaphore,
-) -> crate::Result<HashMap<PathBuf, Project>> {
+) -> crate::Result<HashMap<ProjectPathId, Project>> {
     let mut file_path_hashes = HashMap::new();
 
     // TODO: Make this concurrent and use progressive hashing to avoid loading each JAR in memory
     for path in paths {
-        let mut file = tokio::fs::File::open(path.clone()).await?;
+        let mut file = tokio::fs::File::open(path.clone())
+            .await
+            .map_err(|e| IOError::with_path(e, &path))?;
 
         let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        file.read_to_end(&mut buffer).await.map_err(IOError::from)?;
 
         let hash = format!("{:x}", sha2::Sha512::digest(&buffer));
         file_path_hashes.insert(hash, path.clone());
@@ -339,7 +348,7 @@ pub async fn infer_data_from_files(
     .flatten()
     .collect();
 
-    let mut return_projects = HashMap::new();
+    let mut return_projects: Vec<(PathBuf, Project)> = Vec::new();
     let mut further_analyze_projects: Vec<(String, PathBuf)> = Vec::new();
 
     for (hash, path) in file_path_hashes {
@@ -353,7 +362,7 @@ pub async fn infer_data_from_files(
                     .to_string_lossy()
                     .to_string();
 
-                return_projects.insert(
+                return_projects.push((
                     path,
                     Project {
                         disabled: file_name.ends_with(".disabled"),
@@ -389,7 +398,7 @@ pub async fn infer_data_from_files(
                         sha512: hash,
                         file_name,
                     },
-                );
+                ));
                 continue;
             }
         }
@@ -409,7 +418,7 @@ pub async fn infer_data_from_files(
         {
             zip_file_reader
         } else {
-            return_projects.insert(
+            return_projects.push((
                 path.clone(),
                 Project {
                     sha512: hash,
@@ -417,7 +426,7 @@ pub async fn infer_data_from_files(
                     metadata: ProjectMetadata::Unknown,
                     file_name,
                 },
-            );
+            ));
             continue;
         };
         let zip_index_option = zip_file_reader
@@ -463,7 +472,7 @@ pub async fn infer_data_from_files(
                         )
                         .await?;
 
-                        return_projects.insert(
+                        return_projects.push((
                             path.clone(),
                             Project {
                                 sha512: hash,
@@ -488,7 +497,7 @@ pub async fn infer_data_from_files(
                                     project_type: Some("mod".to_string()),
                                 },
                             },
-                        );
+                        ));
                         continue;
                     }
                 }
@@ -530,7 +539,7 @@ pub async fn infer_data_from_files(
                     )
                     .await?;
 
-                    return_projects.insert(
+                    return_projects.push((
                         path.clone(),
                         Project {
                             sha512: hash,
@@ -549,7 +558,7 @@ pub async fn infer_data_from_files(
                                 project_type: Some("mod".to_string()),
                             },
                         },
-                    );
+                    ));
                     continue;
                 }
             }
@@ -596,7 +605,7 @@ pub async fn infer_data_from_files(
                     )
                     .await?;
 
-                    return_projects.insert(
+                    return_projects.push((
                         path.clone(),
                         Project {
                             sha512: hash,
@@ -618,7 +627,7 @@ pub async fn infer_data_from_files(
                                 project_type: Some("mod".to_string()),
                             },
                         },
-                    );
+                    ));
                     continue;
                 }
             }
@@ -662,7 +671,7 @@ pub async fn infer_data_from_files(
                     )
                     .await?;
 
-                    return_projects.insert(
+                    return_projects.push((
                         path.clone(),
                         Project {
                             sha512: hash,
@@ -694,7 +703,7 @@ pub async fn infer_data_from_files(
                                 project_type: Some("mod".to_string()),
                             },
                         },
-                    );
+                    ));
                     continue;
                 }
             }
@@ -728,7 +737,7 @@ pub async fn infer_data_from_files(
                         io_semaphore,
                     )
                     .await?;
-                    return_projects.insert(
+                    return_projects.push((
                         path.clone(),
                         Project {
                             sha512: hash,
@@ -743,13 +752,13 @@ pub async fn infer_data_from_files(
                                 project_type: None,
                             },
                         },
-                    );
+                    ));
                     continue;
                 }
             }
         }
 
-        return_projects.insert(
+        return_projects.push((
             path.clone(),
             Project {
                 sha512: hash,
@@ -757,8 +766,17 @@ pub async fn infer_data_from_files(
                 file_name,
                 metadata: ProjectMetadata::Unknown,
             },
-        );
+        ));
     }
 
-    Ok(return_projects)
+    // Project paths should be relative
+    let _profile_base_path = profile.get_profile_full_path().await?;
+    let mut corrected_hashmap = HashMap::new();
+    let mut stream = tokio_stream::iter(return_projects);
+    while let Some((h, v)) = stream.next().await {
+        let h = ProjectPathId::from_fs_path(h).await?;
+        corrected_hashmap.insert(h, v);
+    }
+
+    Ok(corrected_hashmap)
 }

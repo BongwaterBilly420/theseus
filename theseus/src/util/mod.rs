@@ -1,6 +1,6 @@
 //! Theseus utility functions
-pub mod export;
 pub mod fetch;
+pub mod io;
 pub mod jre;
 pub mod platform;
 

@@ -12,6 +12,18 @@ pub struct Logs {
 }
 */
 
+pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("logs")
+        .invoke_handler(tauri::generate_handler![
+            logs_get_logs,
+            logs_get_logs_by_datetime,
+            logs_get_output_by_datetime,
+            logs_delete_logs,
+            logs_delete_logs_by_datetime,
+        ])
+        .build()
+}
+
 /// Get all Logs for a profile, sorted by datetime
 #[tauri::command]
 pub async fn logs_get_logs(
@@ -38,7 +50,18 @@ pub async fn logs_get_output_by_datetime(
     profile_uuid: Uuid,
     datetime_string: String,
 ) -> Result<String> {
-    Ok(logs::get_output_by_datetime(profile_uuid, &datetime_string).await?)
+    let profile_path = if let Some(p) =
+        crate::profile::get_by_uuid(profile_uuid, None).await?
+    {
+        p.profile_id()
+    } else {
+        return Err(theseus::Error::from(
+            theseus::ErrorKind::UnmanagedProfileError(profile_uuid.to_string()),
+        )
+        .into());
+    };
+
+    Ok(logs::get_output_by_datetime(&profile_path, &datetime_string).await?)
 }
 
 /// Delete all logs for a profile by profile id
